@@ -1,0 +1,135 @@
+name: Build
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  identify:
+    name: Identify version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: "0"
+      - name: Define commit SHA and branch
+        id: commit_branch
+        run: |
+          if [ "$GITHUB_HEAD_REF" == "" ]; then
+              echo "COMMIT=${{github.sha}}" >> $GITHUB_OUTPUT
+              echo "BRANCH=main" >> $GITHUB_OUTPUT
+          else
+              echo "COMMIT=${{github.event.pull_request.head.sha}}" >> $GITHUB_OUTPUT
+              echo "BRANCH=$GITHUB_HEAD_REF" >> $GITHUB_OUTPUT
+          fi
+    outputs:
+      commit: ${{ steps.commit_branch.outputs.COMMIT }}
+      branch: ${{ steps.commit_branch.outputs.BRANCH }}
+
+  create-tag:
+    name: Create Tags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: "0"
+
+      - name: "Generate semver tag and release"
+        id: semver_tag
+        uses: ministryofjustice/opg-github-actions/actions/semver@b8868247a908f74fafe1905701391580575a6d35 # v4.3.10
+        with:
+          create_release: false
+          default_bump: ${{ github.event_name == 'workflow_dispatch' && 'none' || 'minor' }}
+          prerelease: ${{ github.ref_name == 'main' && 'false' || 'true' }}
+    outputs:
+      tag: ${{ steps.semver_tag.outputs.tag }}
+
+  build:
+    name: Build Snyk Image
+    uses: ministryofjustice/opg-github-workflows/.github/workflows/build-multi-architecture-image.yml@775636910c06dbeb813ab4d83b55142d1bb94d28 # v3.17.0
+    with:
+      image_name: 311462405659.dkr.ecr.eu-west-1.amazonaws.com/shared/snyk
+      build_options: --file Dockerfile
+
+  push:
+    permissions:
+      id-token: write
+      security-events: write
+    name: Push Images
+    runs-on: ubuntu-latest
+    needs:
+      - "identify"
+      - "create-tag"
+      - "build"
+      
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: "0"
+      - uses: unfor19/install-aws-cli-action@f5b46b7f32cf5e7ebd652656c5036bf83dd1e60c # 1.0.8
+
+      - name: Set up Docker
+        run: |
+          echo '{"experimental": true, "features": { "containerd-snapshotter": true }}' | sudo tee -a /etc/docker/daemon.json
+          sudo systemctl restart docker
+          docker run --privileged --rm tonistiigi/binfmt --install all
+          
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: /tmp/images
+          name: multi-arch-image
+
+      - name: Load Images
+        run: docker load -i /tmp/images/multi-arch-image.tar
+
+      - name: Image Versions
+        id: image-version
+        run: |
+          CLI_VERSION=$(docker compose run --rm snyk version)
+          echo "Repo Version: ${{ needs.create-tag.outputs.tag }}"
+          echo "Snyk CLI Version: $CLI_VERSION"
+          echo "Image Tag: cli-$CLI_VERSION-${{ needs.create-tag.outputs.tag }}"
+          echo "image-tag=cli-$CLI_VERSION-${{ needs.create-tag.outputs.tag }}" >> $GITHUB_OUTPUT
+          echo "cli-version=$CLI_VERSION" >> $GITHUB_OUTPUT
+
+
+      - name: Configure OIDC AWS credentials for ECR push
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
+        with:
+          role-to-assume: arn:aws:iam::311462405659:role/snyk-image-builder-oidc-role
+          role-session-name: opg-snyk-image-builder-github-actions-ecr-push
+          role-duration-seconds: 900
+          aws-region: eu-west-1
+
+      - name: ECR Login
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@c962da2960ed15f492addc26fffa274485265950 # v2.0.2
+        with:
+          registries: 311462405659
+
+      - name: Push Container
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: shared/snyk
+        run: |
+          docker tag 311462405659.dkr.ecr.eu-west-1.amazonaws.com/shared/snyk:latest $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.image-version.outputs.image-tag }}
+          if [ "${{ needs.identify.outputs.branch }}" == "main" ]; then
+            # We want all of the tags pushed
+            docker tag 311462405659.dkr.ecr.eu-west-1.amazonaws.com/shared/snyk:latest $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.image-version.outputs.cli-version }}
+            docker tag 311462405659.dkr.ecr.eu-west-1.amazonaws.com/shared/snyk:latest $ECR_REGISTRY/$ECR_REPOSITORY:main-${{ steps.image-version.outputs.cli-version }}
+            docker tag 311462405659.dkr.ecr.eu-west-1.amazonaws.com/shared/snyk:latest $ECR_REGISTRY/$ECR_REPOSITORY:main-${{ steps.image-version.outputs.image-tag }}
+            docker push --all-tags $ECR_REGISTRY/$ECR_REPOSITORY
+          else
+            docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.image-version.outputs.image-tag }}
+          fi
+
+          echo "Container tag: ${{ steps.image-version.outputs.image-tag }}" >> $GITHUB_STEP_SUMMARY
