@@ -45,7 +45,7 @@ jobs:
 
       - name: "Generate semver tag and release"
         id: semver_tag
-        uses: ministryofjustice/opg-github-actions/actions/semver@ae37b9b322286123971417e82b665e56e9d6aa3f # v4.10.3
+        uses: ministryofjustice/opg-github-actions/actions/semver@12bdbe54f92af873347bc0cd6f4e7769265c1a90 # v4.10.5
         with:
           create_release: false
           default_bump: ${{ github.event_name == 'workflow_dispatch' && 'none' || 'minor' }}
@@ -55,7 +55,7 @@ jobs:
 
   build:
     name: Build Snyk Image
-    uses: ministryofjustice/opg-github-workflows/.github/workflows/build-multi-architecture-image.yml@84a762ecab4a2d6217be908505351fd1f9312319 # v3.19.19
+    uses: ministryofjustice/opg-github-workflows/.github/workflows/build-multi-architecture-image.yml@33d743994cd4f13f0e73f74e3bebb92d64f3c26b # v3.19.24
     with:
       image_name: 311462405659.dkr.ecr.eu-west-1.amazonaws.com/shared/snyk
       build_options: --file Dockerfile
